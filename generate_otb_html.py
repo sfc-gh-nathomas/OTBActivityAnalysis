@@ -25,7 +25,8 @@ SFDC_BASE        = "https://snowforce.lightning.force.com"
 ACTIVE_MIN_ACTS  = 5
 ACTIVE_MIN_HRS   = 3.0
 
-GEO = "AMSExpansion"
+GEO     = "AMSExpansion"
+FQ_END  = "2026-04-30"
 
 # ─── Raw Data ─────────────────────────────────────────────────────────────────
 # Columns: (ae, dm, account, account_id, start_date)
@@ -197,6 +198,54 @@ RR_DATA = {
     "001i000001R8a5VAAR": (169413,  "Jan 2026", 182559,  "Mar 2026"),
 }
 
+# Use cases from MDM.MDM_INTERFACES.DIM_USE_CASE
+# {account_id: (uc_created, uc_won)}
+# Created: CREATED_DATE in coverage period
+# Won: DECISION_DATE in coverage period (past), STAGE_NUMBER 4-7
+UC_DATA = {
+    "0010Z00001tFGoKQAW": (0, 0),
+    "0010Z00001tFJ7nQAG": (1, 0),
+    "0010Z00001tFUG0QAO": (1, 0),
+    "0010Z00001uZXGYQA4": (0, 0),
+    "0010Z00001xw65XQAQ": (0, 0),
+    "0010Z00001xwkPDQAY": (0, 0),
+    "0010Z0000259NHnQAM": (0, 0),
+    "0010Z000025Ao5UQAS": (1, 2),
+    "0010Z000026n9KfQAI": (0, 0),
+    "0010Z0000295KoFQAU": (0, 0),
+    "0010Z0000297szGQAQ": (1, 0),
+    "0013100001bn326AAA": (0, 0),
+    "0013100001coYXQAA2": (0, 0),
+    "0013100001dGmrNAAS": (0, 0),
+    "0013100001gXxPTAA0": (0, 0),
+    "0013100001gxIlNAAU": (0, 0),
+    "0013100001kbbJQAAY": (4, 0),
+    "0013100001nnXwhAAE": (0, 0),
+    "0013100001nnZZjAAM": (0, 0),
+    "0013100001nncprAAA": (0, 0),
+    "0013100001oMYuCAAW": (0, 0),
+    "0013100001qwUTcAAM": (2, 0),
+    "0013100001qyDleAAE": (1, 0),
+    "0013100001qzIBSAA2": (0, 0),
+    "0013100001rsDOuAAM": (0, 0),
+    "0013100001rvJiDAAU": (3, 0),
+    "0013r00002EEDzCAAX": (1, 0),
+    "0013r00002EEIpOAAX": (1, 1),
+    "0013r00002EEWF4AAP": (0, 0),
+    "0013r00002EFLhiAAH": (1, 0),
+    "0013r00002EFsqEAAT": (0, 0),
+    "0013r00002IJS7WAAX": (1, 0),
+    "0013r00002K9dB2AAJ": (0, 0),
+    "0013r00002K9hK7AAJ": (0, 0),
+    "0013r00002Pa9dVAAR": (0, 0),
+    "0013r00002QbYmeAAF": (0, 0),
+    "0013r00002QcPGJAA3": (0, 0),
+    "0013r00002UrHHtAAN": (0, 0),
+    "0013r00002XWxb2AAD": (0, 0),
+    "0013r00002YMhtnAAD": (0, 0),
+    "001Do00000LaFWDIA3": (0, 0),
+    "001i000001R8a5VAAR": (0, 0),
+}
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 def is_active(acts, hrs):
@@ -246,6 +295,8 @@ for ae, dm, account, acct_id, start_date in ACCOUNTS:
     acts, mtgs, emails, hrs = ACTIVITY.get(act_key, (0, 0, 0, 0.0))
 
     rr_start, rr_start_month, rr_current, rr_current_month = RR_DATA.get(acct_id, (None, None, None, None))
+    uc_created, uc_won = UC_DATA.get(acct_id, (0, 0))
+    end_date = FQ_END
     active = is_active(acts, hrs)
     pct    = fmt_pct(rr_start, rr_current)
 
@@ -255,6 +306,7 @@ for ae, dm, account, acct_id, start_date in ACCOUNTS:
         "account":          account,
         "acct_id":          acct_id,
         "start_date":       start_date,
+        "end_date":         end_date,
         "acts":             acts,
         "mtgs":             mtgs,
         "emails":           emails,
@@ -264,6 +316,8 @@ for ae, dm, account, acct_id, start_date in ACCOUNTS:
         "rr_current":       rr_current,
         "rr_current_month": rr_current_month,
         "pct":              pct,
+        "uc_created":       uc_created,
+        "uc_won":           uc_won,
         "active":           active,
     })
 
@@ -476,7 +530,7 @@ def build_html():
   .rr-dn   {{ color: #c62828; font-weight: 600; }}
   .rr-flat {{ color: #616161; }}
 
-  td.num {{ text-align: right; }}
+  td.num, th.num {{ text-align: right; }}
 
   /* hidden rows for filter */
   tr.hidden-row {{ display: none; }}
@@ -558,6 +612,7 @@ def build_html():
             <tr>
               <th>Account</th>
               <th>Coverage Start</th>
+              <th>Coverage End</th>
               <th>RR at Start</th>
               <th>Current RR</th>
               <th>RR Change</th>
@@ -565,6 +620,8 @@ def build_html():
               <th class="num">Meetings</th>
               <th class="num">Emails</th>
               <th class="num">Mtg Hrs</th>
+              <th class="num">UCs Created</th>
+              <th class="num">UCs Won</th>
               <th>Status</th>
               <th>Action</th>
             </tr>
@@ -592,6 +649,7 @@ def build_html():
                 parts.append(f"""            <tr class="{row_cls}" data-active="{data_active}">
               <td class="acct-name">{r["account"]}</td>
               <td>{r["start_date"]}</td>
+              <td>{r["end_date"]}</td>
               <td>{rr_s}</td>
               <td>{rr_l}</td>
               <td>{pct}</td>
@@ -599,6 +657,8 @@ def build_html():
               <td class="num">{r["mtgs"]}</td>
               <td class="num">{r["emails"]}</td>
               <td class="num">{r["hrs"]:.1f}</td>
+              <td class="num">{r["uc_created"]}</td>
+              <td class="num">{r["uc_won"]}</td>
               <td>{badge}</td>
               <td>{action}</td>
             </tr>
