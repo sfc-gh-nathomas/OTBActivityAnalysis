@@ -101,7 +101,7 @@ FROM pairs p
 LEFT JOIN SALES.ACTIVITY.SETSAIL_RAW_ACTIVITY a
   ON  a.EMAIL      = p.ae_email
   AND a.ACCOUNT_ID = p.account_id
-  AND a.ACTIVITY_DATE BETWEEN p.start_date AND CURRENT_DATE()
+  AND a.ACTIVITY_DATE BETWEEN p.start_date AND LEAST(p.end_date, CURRENT_DATE())
 GROUP BY 1, 2;
 ```
 
@@ -165,14 +165,48 @@ Store results as `RR_DATA` dict: `{account_id: (rr_start, rr_start_month, rr_cur
 
 ---
 
-### Step 5: Update Generator Script
+### Step 5: Query Use Cases
 
-The script lives at `/tmp/generate_otb_html.py`. Update these four hardcoded dicts:
+Source: `MDM.MDM_INTERFACES.DIM_USE_CASE`
+
+- **Created**: `CREATED_DATE BETWEEN start_date AND end_date`
+- **Won**: `DECISION_DATE BETWEEN start_date AND LEAST(end_date, CURRENT_DATE())` AND `STAGE_NUMBER BETWEEN 4 AND 7`
+  - Stage 4 = "Use Case Won / Migration Plan", Stage 7 = "Deployed", Stage 8 = "Lost" (excluded)
+
+```sql
+WITH accounts AS (
+  SELECT column1 AS account_id, column2::DATE AS start_date, column3::DATE AS end_date
+  FROM (VALUES
+    ('<sfdc_id_1>', '<start_date_1>', '<end_date>'),
+    ('<sfdc_id_2>', '<start_date_2>', '<end_date>')
+    -- ...
+  )
+)
+SELECT
+    a.account_id,
+    COUNT(CASE WHEN u.CREATED_DATE BETWEEN a.start_date AND a.end_date THEN 1 END) AS uc_created,
+    COUNT(CASE WHEN u.DECISION_DATE BETWEEN a.start_date AND LEAST(a.end_date, CURRENT_DATE())
+                AND u.STAGE_NUMBER BETWEEN 4 AND 7 THEN 1 END)                     AS uc_won
+FROM accounts a
+LEFT JOIN MDM.MDM_INTERFACES.DIM_USE_CASE u
+  ON u.ACCOUNT_ID = a.account_id
+GROUP BY 1
+ORDER BY 1;
+```
+
+Store results as `UC_DATA` dict: `{account_id: (uc_created, uc_won)}`.
+
+---
+
+### Step 6: Update Generator Script
+
+The script lives at `/tmp/generate_otb_html.py`. Update these five hardcoded dicts:
 
 1. **`ACCOUNTS`** — list of `(ae, dm, account, acct_id, start_date)` tuples (one per row, multi-account rows already split)
 2. **`AE_EMAIL`** — `{ae_name: ae_email}` from Step 2
 3. **`ACTIVITY`** — `{(acct_id, ae_email): (acts, mtgs, emails, hrs)}` from Step 3
 4. **`RR_DATA`** — `{acct_id: (rr_start, rr_start_month, rr_current, rr_current_month)}` from Step 4
+5. **`UC_DATA`** — `{acct_id: (uc_created, uc_won)}` from Step 5
 
 Also update header constants:
 ```python
@@ -185,7 +219,7 @@ FQ_END       = "<FQ_END>"
 
 ---
 
-### Step 6: Generate and Open
+### Step 7: Generate and Open
 
 ```bash
 python3 /tmp/generate_otb_html.py
@@ -203,6 +237,7 @@ DMs: D | AEs: A
 - Active/inactive counts look reasonable
 - RR deltas (↑/↓) are plausible
 - No accounts missing run rate data (shown as —)
+- UC Created/Won counts look reasonable (most accounts will be 0)
 
 ---
 
@@ -213,6 +248,7 @@ DMs: D | AEs: A
 | `FIVETRAN.SALESFORCE.USER` | AE/DM name → email lookup |
 | `SALES.ACTIVITY.SETSAIL_RAW_ACTIVITY` | Activity counts and meeting hours |
 | `SALES.SE_REPORTING.AGG_MONTHLY_PRODUCT_CATEGORY_ACCOUNT_METRICS` | Run rates (AVG_DAILY_REVENUE × 365, summed across all product categories) |
+| `MDM.MDM_INTERFACES.DIM_USE_CASE` | Use cases created + won during coverage period |
 
 Warehouse: `SNOWADHOC`
 
@@ -221,12 +257,13 @@ Warehouse: `SNOWADHOC`
 ## Stopping Points
 
 - ✋ **Step 1** — confirm parsed account count before querying Snowflake
-- ✋ **Step 6** — review output before sharing
+- ✋ **Step 7** — review output before sharing
 
 ## Output
 
 `~/Downloads/Active_OTB_Analysis.html` — filterable HTML dashboard:
 - Grouped by DM → AE → accounts
 - Active/Inactive toggle (≥5 acts or ≥3 hrs meetings)
-- RR at start, current RR, delta indicator (↑/↓/→)
+- Columns: Account, Coverage Start, Coverage End, RR at Start, Current RR, RR Change, Activities, Meetings, Emails, Mtg Hrs, UCs Created, UCs Won, Status, Action
+- RR delta indicator (↑/↓/→)
 - SFDC links per account
