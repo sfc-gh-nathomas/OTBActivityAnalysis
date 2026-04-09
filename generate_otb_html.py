@@ -248,8 +248,9 @@ UC_DATA = {
 }
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
-def is_active(acts, hrs):
-    return acts >= ACTIVE_MIN_ACTS or hrs >= ACTIVE_MIN_HRS
+def is_active(acts, hrs, uc_created=0, uc_won=0):
+    return (acts >= ACTIVE_MIN_ACTS or hrs >= ACTIVE_MIN_HRS
+            or uc_created > 0 or uc_won > 0)
 
 def fmt_rr(val):
     if val is None:
@@ -297,7 +298,7 @@ for ae, dm, account, acct_id, start_date in ACCOUNTS:
     rr_start, rr_start_month, rr_current, rr_current_month = RR_DATA.get(acct_id, (None, None, None, None))
     uc_created, uc_won = UC_DATA.get(acct_id, (0, 0))
     end_date = FQ_END
-    active = is_active(acts, hrs)
+    active = is_active(acts, hrs, uc_created, uc_won)
     pct    = fmt_pct(rr_start, rr_current)
 
     rows.append({

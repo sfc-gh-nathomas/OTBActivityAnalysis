@@ -19,7 +19,7 @@ Produces `/Users/nathomas/Downloads/Active_OTB_Analysis.html` from three live da
 | `<SNOWFLAKE_CONNECTION>` | No | `MyConnection` (default) |
 | `<OUTPUT_PATH>` | No | `~/Downloads/Active_OTB_Analysis.html` (default) |
 
-**Active threshold:** ≥5 activities **or** ≥3.0 meeting hours since coverage start date.
+**Active threshold:** ≥5 activities **or** ≥3.0 meeting hours **or** ≥1 UC created **or** ≥1 UC won during coverage period.
 
 ---
 
@@ -257,13 +257,24 @@ Warehouse: `SNOWADHOC`
 ## Stopping Points
 
 - ✋ **Step 1** — confirm parsed account count before querying Snowflake
+  - Verify: account count matches expectation (e.g. 45 for Q1 FY27 AMSExpansion)
+  - Verify: no duplicate `account_id` values in the parsed list
+  - Verify: all `start_date` values are valid dates within the FQ
+  - Verify: AE names all have entries in `AE_EMAIL` (no blank emails in output)
+
 - ✋ **Step 7** — review output before sharing
+  - Verify: active/inactive split is plausible (not 0 active or all active)
+  - Verify: spot-check 2–3 accounts — confirm activity counts match SetSail manually
+  - Verify: UC Created/Won counts look reasonable (most accounts 0; flag any with >5 as suspicious)
+  - Verify: no accounts show `—` for both RR at Start and Current RR unless the account is truly new
+  - Verify: Coverage End date shows `<FQ_END>` for all rows
+  - Verify: Active badge fires correctly for accounts with UC data but low activity counts
 
 ## Output
 
 `~/Downloads/Active_OTB_Analysis.html` — filterable HTML dashboard:
 - Grouped by DM → AE → accounts
-- Active/Inactive toggle (≥5 acts or ≥3 hrs meetings)
+- Active/Inactive toggle (≥5 acts or ≥3 hrs or ≥1 UC created/won)
 - Columns: Account, Coverage Start, Coverage End, RR at Start, Current RR, RR Change, Activities, Meetings, Emails, Mtg Hrs, UCs Created, UCs Won, Status, Action
 - RR delta indicator (↑/↓/→)
 - SFDC links per account
