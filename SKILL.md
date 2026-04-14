@@ -24,6 +24,19 @@ SCRIPT        = /tmp/generate_otb_html.py
 
 ---
 
+## ⚠️ MANDATORY FIRST STEP — Ask Before Doing Anything
+
+**Before running any query, opening any tool, or executing any code, you MUST ask the user which path they want.**
+
+Use AskUserQuestion with these options:
+- **Path A** — Regenerate the HTML report using existing hardcoded data (no Snowflake, no Glean, ~5 seconds)
+- **Path B** — Pull fresh activity, run rate, and UC data from Snowflake, then regenerate (same accounts, new numbers)
+- **Path C** — Full refresh: re-read the OTB sheet via Glean, re-enrich AE/DM names, re-run all Snowflake queries (use only for new quarter or account changes)
+
+Do not assume Path C. Most requests are Path A or B. Only proceed once the user has confirmed their choice.
+
+---
+
 ## Which Path to Use?
 
 | Situation | Path |
