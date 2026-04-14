@@ -105,7 +105,8 @@ Save parsed accounts to `/tmp/otb_accounts.json`:
 - Account count matches expectation (Q1 FY27 AMSExpansion = 45)
 - No duplicate `account_id` values
 - All `start_date` values are valid dates within the FQ
-- AE names all resolve to known aliases
+- **All AE names match known Snowflake employees** — cross-check every parsed AE name against the existing `AE_EMAIL` dict. Any name not in `AE_EMAIL` is a parse error (leaked header row, note cell, or adjacent text). Remove those rows before continuing.
+- Spot-check 3–4 rows: confirm the account name and SFDC ID are correctly paired (multi-account rows are prone to name/ID order mismatch — verify by looking up one ID in SFDC)
 
 ---
 
