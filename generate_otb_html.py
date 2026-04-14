@@ -919,6 +919,103 @@ function applyFilter() {
     return "".join(parts)
 
 
+# ─── Account Update ───────────────────────────────────────────────────────────
+
+def _update_accounts_from_json(json_path):
+    """Load a JSON file of account entries, look up AE emails + DM display names
+    in Salesforce, and return (new_accounts_list, new_ae_email_dict).
+
+    Expected JSON format:
+    [
+      {"ae": "DJ Kline", "dm_email": "nicolette.mullenix@snowflake.com",
+       "account": "Trimble", "account_id": "0013r00002EEIpOAAX", "start_date": "2026-02-01"},
+      ...
+    ]
+    """
+    with open(json_path) as f:
+        entries = json.load(f)
+
+    ae_names  = sorted({e["ae"]       for e in entries})
+    dm_emails = sorted({e["dm_email"] for e in entries})
+
+    # Batch AE name → email lookup
+    ae_in   = ", ".join(f"'{n}'" for n in ae_names)
+    ae_rows = _run_query(f"""
+        SELECT NAME, EMAIL
+        FROM FIVETRAN.SALESFORCE.USER
+        WHERE IS_ACTIVE = TRUE AND NAME IN ({ae_in})
+    """)
+    ae_email_map = {r["NAME"]: r["EMAIL"] for r in ae_rows}
+
+    # Last-name ILIKE fallback for any unresolved AEs
+    missing = [n for n in ae_names if n not in ae_email_map]
+    if missing:
+        print(f"Warning: no exact Salesforce match for AEs: {missing}")
+        for name in missing:
+            last = name.split()[-1]
+            rows = _run_query(f"""
+                SELECT NAME, EMAIL FROM FIVETRAN.SALESFORCE.USER
+                WHERE IS_ACTIVE = TRUE AND NAME ILIKE '%{last}%' LIMIT 5
+            """)
+            if len(rows) == 1:
+                ae_email_map[name] = rows[0]["EMAIL"]
+                print(f"  Resolved '{name}' → {rows[0]['EMAIL']}")
+            else:
+                print(f"  Could not auto-resolve '{name}': {[r['NAME'] for r in rows]}")
+
+    # Batch DM email → display name lookup
+    dm_in   = ", ".join(f"'{e}'" for e in dm_emails)
+    dm_rows = _run_query(f"""
+        SELECT NAME, EMAIL FROM FIVETRAN.SALESFORCE.USER WHERE EMAIL IN ({dm_in})
+    """)
+    dm_name_map = {r["EMAIL"]: r["NAME"] for r in dm_rows}
+    for em in dm_emails:
+        if em not in dm_name_map:
+            print(f"Warning: DM email not found in Salesforce: {em}")
+
+    # Build new ACCOUNTS list
+    new_accounts = []
+    for e in entries:
+        dm_name = dm_name_map.get(e["dm_email"], e["dm_email"])
+        new_accounts.append((e["ae"], dm_name, e["account"], e["account_id"], e["start_date"]))
+
+    # Build new AE_EMAIL dict (unique AEs, sorted)
+    new_ae_email = {}
+    for name in sorted({e["ae"] for e in entries}):
+        if name in ae_email_map:
+            new_ae_email[name] = ae_email_map[name]
+
+    return new_accounts, new_ae_email
+
+
+def _patch_script(new_accounts, new_ae_email):
+    """Rewrite the ACCOUNTS and AE_EMAIL sections in this script file in-place."""
+    script_path = os.path.realpath(__file__)
+    with open(script_path) as f:
+        content = f.read()
+
+    # Format ACCOUNTS entries
+    acct_lines = [
+        f'    ("{ae}", "{dm}", "{acct}", "{aid}", "{sd}"),'
+        for ae, dm, acct, aid, sd in new_accounts
+    ]
+    accts_block = "ACCOUNTS = [\n" + "\n".join(acct_lines) + "\n]"
+
+    # Format AE_EMAIL entries
+    email_lines = [
+        f'    "{name}": "{email}",'
+        for name, email in sorted(new_ae_email.items())
+    ]
+    ae_email_block = "AE_EMAIL = {\n" + "\n".join(email_lines) + "\n}"
+
+    content = re.sub(r'ACCOUNTS = \[.*?\n\]', accts_block, content, flags=re.DOTALL)
+    content = re.sub(r'AE_EMAIL = \{.*?\n\}', ae_email_block, content, flags=re.DOTALL)
+
+    with open(script_path, "w") as f:
+        f.write(content)
+    print(f"Script patched: {script_path}")
+
+
 # ─── Write output ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Active OTB Analysis HTML report")
@@ -928,7 +1025,17 @@ if __name__ == "__main__":
                         help="Use hardcoded data only — no Snowflake queries (Path A)")
     parser.add_argument("--cache-ttl",    type=int, default=CACHE_TTL_HRS,
                         help=f"Cache TTL in hours (default: {CACHE_TTL_HRS})")
+    parser.add_argument("--update-accounts", metavar="JSON_PATH",
+                        help="JSON file of new accounts; rewrites ACCOUNTS + AE_EMAIL "
+                             "in-place, then auto-runs --refresh")
     args = parser.parse_args()
+
+    if args.update_accounts:
+        new_accounts, new_ae_email = _update_accounts_from_json(args.update_accounts)
+        ACCOUNTS  = list(new_accounts)
+        AE_EMAIL  = new_ae_email
+        _patch_script(new_accounts, new_ae_email)
+        args.refresh = True   # always re-query with the new account list
 
     if not args.no_snowflake:
         ACTIVITY, RR_DATA, UC_DATA = fetch_live_data(args.refresh, args.cache_ttl)
