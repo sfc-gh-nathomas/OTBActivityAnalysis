@@ -29,9 +29,9 @@ SCRIPT        = /tmp/generate_otb_html.py
 **Before running any query, opening any tool, or executing any code, you MUST ask the user which path they want.**
 
 Use AskUserQuestion with these options:
-- **Path A** — Regenerate the HTML report using existing hardcoded data (no Snowflake, no Glean, ~5 seconds)
-- **Path B** — Pull fresh activity, run rate, and UC data from Snowflake, then regenerate (same accounts, new numbers)
-- **Path C** — Full refresh: re-read the OTB sheet via Glean, re-enrich AE/DM names, re-run all Snowflake queries (use only for new quarter or account changes)
+- **Path A** — Regenerate the HTML using hardcoded data (`--no-snowflake`). No Snowflake or Glean. ~5 seconds.
+- **Path B** — Pull fresh data from Snowflake and regenerate (`--refresh`). 3 queries run in parallel, ~10 seconds. Uses cache for 4h after that.
+- **Path C** — Full refresh: re-read OTB sheet via Glean, re-enrich AE/DM names, then run `--refresh`. Use only for new quarter or account changes.
 
 Do not assume Path C. Most requests are Path A or B. Only proceed once the user has confirmed their choice.
 
@@ -49,10 +49,10 @@ Do not assume Path C. Most requests are Path A or B. Only proceed once the user 
 
 ## Path A — Regenerate Report (no data changes)
 
-No Glean or Snowflake needed. The script has all data hardcoded.
+No Glean or Snowflake needed. The script uses hardcoded data.
 
 ```bash
-python3 /tmp/generate_otb_html.py
+python3 /tmp/generate_otb_html.py --no-snowflake
 open ~/Downloads/Active_OTB_Analysis.html
 ```
 
@@ -69,9 +69,14 @@ Then run the **Step 7 verification checklist** below before sharing.
 
 ## Path B — Refresh Data (same accounts, new numbers)
 
-Run Steps 3–5 to pull fresh Snowflake data, update the script dicts, then regenerate.
+The script now fetches live data from Snowflake automatically — no manual SQL copy-paste needed.
 
-Skip directly to **Step 3** — do not re-run Glean or re-enrich AE/DM names.
+```bash
+python3 /tmp/generate_otb_html.py           # uses cache if < 4h old
+python3 /tmp/generate_otb_html.py --refresh # forces fresh Snowflake queries
+```
+
+The `--refresh` flag runs 3 queries in parallel (activity, run rates, use cases) and caches results to `~/.otb_cache.json`. Subsequent runs within 4 hours reuse the cache instantly.
 
 ---
 

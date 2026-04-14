@@ -13,7 +13,10 @@ Data sources:
 Generated: 2026-04-07
 """
 
+import argparse, json, os, shutil, subprocess, sys, time
 import re
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -25,8 +28,12 @@ SFDC_BASE        = "https://snowforce.lightning.force.com"
 ACTIVE_MIN_ACTS  = 5
 ACTIVE_MIN_HRS   = 3.0
 
-GEO     = "AMSExpansion"
-FQ_END  = "2026-04-30"
+GEO      = "AMSExpansion"
+FQ_START = "2026-02-01"
+FQ_END   = "2026-04-30"
+
+CACHE_PATH    = os.path.expanduser("~/.otb_cache.json")
+CACHE_TTL_HRS = 4
 
 # ─── Raw Data ─────────────────────────────────────────────────────────────────
 # Columns: (ae, dm, account, account_id, start_date)
@@ -247,6 +254,214 @@ UC_DATA = {
     "001i000001R8a5VAAR": (0, 0),
 }
 
+# ─── SQL Builders ─────────────────────────────────────────────────────────────
+
+def _build_activity_sql():
+    pairs = []
+    for ae, _dm, _acct, acct_id, start_date in ACCOUNTS:
+        ae_email = AE_EMAIL.get(ae, "")
+        if ae_email:
+            pairs.append(
+                f"('{ae_email}', '{acct_id}', '{start_date}'::DATE, '{FQ_END}'::DATE)"
+            )
+    values = ",\n    ".join(pairs)
+    return f"""
+SELECT
+  p.ae_email,
+  p.account_id,
+  COUNT(*)                                                AS total_acts,
+  COUNT(CASE WHEN a.ACTIVITY_TYPE = 'MEETING' THEN 1 END) AS meetings,
+  COUNT(CASE WHEN a.ACTIVITY_TYPE = 'EMAIL'   THEN 1 END) AS emails,
+  COALESCE(SUM(CASE WHEN a.ACTIVITY_TYPE = 'MEETING'
+                    THEN a.DURATION / 60.0 END), 0)       AS meeting_hrs
+FROM (VALUES
+    {values}
+) AS p(ae_email, account_id, start_date, end_date)
+LEFT JOIN SALES.ACTIVITY.SETSAIL_RAW_ACTIVITY a
+  ON  a.EMAIL         = p.ae_email
+  AND a.ACCOUNT_ID    = p.account_id
+  AND a.ACTIVITY_DATE BETWEEN p.start_date AND LEAST(p.end_date, CURRENT_DATE())
+  AND a.ACTIVITY_DATE >= '{FQ_START}'
+GROUP BY 1, 2
+"""
+
+
+def _build_rr_sql():
+    seen = set()
+    pairs = []
+    for _ae, _dm, _acct, acct_id, start_date in ACCOUNTS:
+        if acct_id not in seen:
+            pairs.append(f"('{acct_id}', '{start_date}'::DATE)")
+            seen.add(acct_id)
+    values = ",\n    ".join(pairs)
+    return f"""
+WITH
+rr_start AS (
+  SELECT
+    p.account_id,
+    SUM(m.AVG_DAILY_REVENUE) * 365 AS rr_start,
+    MAX(m.CONSUMPTION_MONTH)        AS rr_start_month
+  FROM (VALUES
+    {values}
+  ) AS p(account_id, start_date)
+  JOIN SALES.SE_REPORTING.AGG_MONTHLY_PRODUCT_CATEGORY_ACCOUNT_METRICS m
+    ON m.SALESFORCE_ACCOUNT_ID = p.account_id
+  WHERE m.IS_CURRENT_MONTH = FALSE
+    AND m.CONSUMPTION_MONTH = DATEADD('month', -1, DATE_TRUNC('month', p.start_date))
+  GROUP BY 1
+),
+rr_current AS (
+  SELECT
+    p.account_id,
+    SUM(m.AVG_DAILY_REVENUE) * 365 AS rr_current,
+    MAX(m.CONSUMPTION_MONTH)        AS rr_current_month
+  FROM (VALUES
+    {values}
+  ) AS p(account_id, start_date)
+  JOIN SALES.SE_REPORTING.AGG_MONTHLY_PRODUCT_CATEGORY_ACCOUNT_METRICS m
+    ON m.SALESFORCE_ACCOUNT_ID = p.account_id
+  WHERE m.IS_CURRENT_MONTH = FALSE
+  GROUP BY 1
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY p.account_id
+                             ORDER BY MAX(m.CONSUMPTION_MONTH) DESC) = 1
+)
+SELECT
+  s.account_id,
+  s.rr_start,
+  TO_CHAR(s.rr_start_month,  'Mon YYYY') AS rr_start_month,
+  c.rr_current,
+  TO_CHAR(c.rr_current_month,'Mon YYYY') AS rr_current_month
+FROM rr_start s
+LEFT JOIN rr_current c ON c.account_id = s.account_id
+"""
+
+
+def _build_uc_sql():
+    seen = set()
+    pairs = []
+    for _ae, _dm, _acct, acct_id, start_date in ACCOUNTS:
+        if acct_id not in seen:
+            pairs.append(f"('{acct_id}', '{start_date}'::DATE, '{FQ_END}'::DATE)")
+            seen.add(acct_id)
+    values = ",\n    ".join(pairs)
+    return f"""
+SELECT
+  p.account_id,
+  COUNT(CASE WHEN u.CREATED_DATE  BETWEEN p.start_date AND p.end_date
+             THEN 1 END)                                              AS uc_created,
+  COUNT(CASE WHEN u.DECISION_DATE BETWEEN p.start_date
+                                  AND LEAST(p.end_date, CURRENT_DATE())
+              AND u.STAGE_NUMBER BETWEEN 4 AND 7
+             THEN 1 END)                                              AS uc_won
+FROM (VALUES
+    {values}
+) AS p(account_id, start_date, end_date)
+LEFT JOIN MDM.MDM_INTERFACES.DIM_USE_CASE u
+  ON u.ACCOUNT_ID = p.account_id
+GROUP BY 1
+"""
+
+
+# ─── Snowflake Fetch + Cache ───────────────────────────────────────────────────
+
+def _run_query(sql):
+    """Execute SQL via snow CLI and return list of row dicts."""
+    # Resolve snow: prefer sibling of the real Python binary (handles symlinked python3)
+    snow = os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "snow")
+    if not os.path.exists(snow):
+        snow = shutil.which("snow") or snow
+    result = subprocess.run(
+        [snow, "sql", "-c", "MyConnection", "--format", "json", "-q", sql],
+        capture_output=True, text=True, check=True
+    )
+    return json.loads(result.stdout)
+
+
+def _parse_activity(rows):
+    out = {}
+    for r in rows:
+        key = (r["ACCOUNT_ID"], r["AE_EMAIL"])
+        out[key] = (
+            int(r["TOTAL_ACTS"]),
+            int(r["MEETINGS"]),
+            int(r["EMAILS"]),
+            float(r["MEETING_HRS"]),
+        )
+    return out
+
+
+def _parse_rr(rows):
+    out = {}
+    for r in rows:
+        out[r["ACCOUNT_ID"]] = (
+            float(r["RR_START"])   if r["RR_START"]   is not None else None,
+            r["RR_START_MONTH"],
+            float(r["RR_CURRENT"]) if r["RR_CURRENT"] is not None else None,
+            r["RR_CURRENT_MONTH"],
+        )
+    return out
+
+
+def _parse_uc(rows):
+    return {r["ACCOUNT_ID"]: (int(r["UC_CREATED"]), int(r["UC_WON"])) for r in rows}
+
+
+def _save_cache(activity, rr_data, uc_data):
+    cache = {
+        "generated_at": datetime.now().isoformat(),
+        "activity": [[list(k), list(v)] for k, v in activity.items()],
+        "rr_data":  [[k, list(v)]       for k, v in rr_data.items()],
+        "uc_data":  [[k, list(v)]       for k, v in uc_data.items()],
+    }
+    with open(CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
+
+def _load_cache(ttl_hrs):
+    if not os.path.exists(CACHE_PATH):
+        return None
+    with open(CACHE_PATH) as f:
+        cache = json.load(f)
+    age_hrs = (
+        datetime.now() - datetime.fromisoformat(cache["generated_at"])
+    ).total_seconds() / 3600
+    if age_hrs > ttl_hrs:
+        return None
+    return {
+        "generated_at": cache["generated_at"],
+        "activity": {tuple(k): tuple(v) for k, v in cache["activity"]},
+        "rr_data":  {k: tuple(v)        for k, v in cache["rr_data"]},
+        "uc_data":  {k: tuple(v)        for k, v in cache["uc_data"]},
+    }
+
+
+def fetch_live_data(refresh=False, ttl_hrs=CACHE_TTL_HRS):
+    """Return (ACTIVITY, RR_DATA, UC_DATA) from cache or live Snowflake queries."""
+    if not refresh:
+        cached = _load_cache(ttl_hrs)
+        if cached:
+            ts = cached["generated_at"][:16].replace("T", " ")
+            print(f"Using cached data from {ts}  (--refresh to force update)")
+            return cached["activity"], cached["rr_data"], cached["uc_data"]
+
+    print("Fetching from Snowflake (3 queries in parallel)...")
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_act = pool.submit(_run_query, _build_activity_sql())
+        f_rr  = pool.submit(_run_query, _build_rr_sql())
+        f_uc  = pool.submit(_run_query, _build_uc_sql())
+        act_rows = f_act.result()
+        rr_rows  = f_rr.result()
+        uc_rows  = f_uc.result()
+
+    activity = _parse_activity(act_rows)
+    rr_data  = _parse_rr(rr_rows)
+    uc_data  = _parse_uc(uc_rows)
+    _save_cache(activity, rr_data, uc_data)
+    print(f"Done ({time.time() - t0:.1f}s) — cache: {CACHE_PATH}")
+    return activity, rr_data, uc_data
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 def is_active(acts, hrs, uc_created=0, uc_won=0):
     return (acts >= ACTIVE_MIN_ACTS or hrs >= ACTIVE_MIN_HRS
@@ -286,59 +501,6 @@ def rr_cell(val, month_label):
     if month_label:
         return f"<span title='{month_label}'>{text}</span>"
     return text
-
-
-# ─── Build enriched row list ──────────────────────────────────────────────────
-rows = []
-for ae, dm, account, acct_id, start_date in ACCOUNTS:
-    ae_email = AE_EMAIL.get(ae, "")
-    act_key  = (acct_id, ae_email)
-    acts, mtgs, emails, hrs = ACTIVITY.get(act_key, (0, 0, 0, 0.0))
-
-    rr_start, rr_start_month, rr_current, rr_current_month = RR_DATA.get(acct_id, (None, None, None, None))
-    uc_created, uc_won = UC_DATA.get(acct_id, (0, 0))
-    end_date = FQ_END
-    active = is_active(acts, hrs, uc_created, uc_won)
-    pct    = fmt_pct(rr_start, rr_current)
-
-    rows.append({
-        "ae":               ae,
-        "dm":               dm,
-        "account":          account,
-        "acct_id":          acct_id,
-        "start_date":       start_date,
-        "end_date":         end_date,
-        "acts":             acts,
-        "mtgs":             mtgs,
-        "emails":           emails,
-        "hrs":              hrs,
-        "rr_start":         rr_start,
-        "rr_start_month":   rr_start_month,
-        "rr_current":       rr_current,
-        "rr_current_month": rr_current_month,
-        "pct":              pct,
-        "uc_created":       uc_created,
-        "uc_won":           uc_won,
-        "active":           active,
-    })
-
-n_active   = sum(1 for r in rows if r["active"])
-n_inactive = len(rows) - n_active
-
-
-# ─── Group: DM → AE → [rows] ─────────────────────────────────────────────────
-from collections import defaultdict
-
-dm_order = []
-seen_dms = set()
-for r in rows:
-    if r["dm"] not in seen_dms:
-        dm_order.append(r["dm"])
-        seen_dms.add(r["dm"])
-
-grouped = defaultdict(lambda: defaultdict(list))
-for r in rows:
-    grouped[r["dm"]][r["ae"]].append(r)
 
 
 # ─── HTML Builder ─────────────────────────────────────────────────────────────
@@ -759,6 +921,57 @@ function applyFilter() {
 
 # ─── Write output ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate Active OTB Analysis HTML report")
+    parser.add_argument("--refresh",      action="store_true",
+                        help="Force fresh Snowflake queries (ignore cache)")
+    parser.add_argument("--no-snowflake", action="store_true",
+                        help="Use hardcoded data only — no Snowflake queries (Path A)")
+    parser.add_argument("--cache-ttl",    type=int, default=CACHE_TTL_HRS,
+                        help=f"Cache TTL in hours (default: {CACHE_TTL_HRS})")
+    args = parser.parse_args()
+
+    if not args.no_snowflake:
+        ACTIVITY, RR_DATA, UC_DATA = fetch_live_data(args.refresh, args.cache_ttl)
+
+    # ─── Build enriched row list ───────────────────────────────────────────────
+    rows = []
+    for ae, dm, account, acct_id, start_date in ACCOUNTS:
+        ae_email = AE_EMAIL.get(ae, "")
+        act_key  = (acct_id, ae_email)
+        acts, mtgs, emails, hrs = ACTIVITY.get(act_key, (0, 0, 0, 0.0))
+
+        rr_start, rr_start_month, rr_current, rr_current_month = RR_DATA.get(acct_id, (None, None, None, None))
+        uc_created, uc_won = UC_DATA.get(acct_id, (0, 0))
+        end_date = FQ_END
+        active = is_active(acts, hrs, uc_created, uc_won)
+        pct    = fmt_pct(rr_start, rr_current)
+
+        rows.append({
+            "ae": ae, "dm": dm, "account": account, "acct_id": acct_id,
+            "start_date": start_date, "end_date": end_date,
+            "acts": acts, "mtgs": mtgs, "emails": emails, "hrs": hrs,
+            "rr_start": rr_start, "rr_start_month": rr_start_month,
+            "rr_current": rr_current, "rr_current_month": rr_current_month,
+            "pct": pct, "uc_created": uc_created, "uc_won": uc_won,
+            "active": active,
+        })
+
+    n_active   = sum(1 for r in rows if r["active"])
+    n_inactive = len(rows) - n_active
+
+    # ─── Group: DM → AE → [rows] ──────────────────────────────────────────────
+    dm_order = []
+    seen_dms = set()
+    for r in rows:
+        if r["dm"] not in seen_dms:
+            dm_order.append(r["dm"])
+            seen_dms.add(r["dm"])
+
+    grouped = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        grouped[r["dm"]][r["ae"]].append(r)
+
+    # ─── Generate + write ──────────────────────────────────────────────────────
     html    = build_html()
     outfile = "/Users/nathomas/Downloads/Active_OTB_Analysis.html"
     with open(outfile, "w") as f:
