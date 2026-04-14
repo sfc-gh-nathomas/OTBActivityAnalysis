@@ -86,6 +86,10 @@ https://docs.google.com/spreadsheets/d/1rPURUkIlunN9nMICZmZLbdIbtdrZMjsrYgfrUSTv
 - col[9] = Account name
 - col[10] = SFDC Account ID
 
+**Filtering — apply both before storing any row:**
+1. `col[2] == "<THEATER>"` (e.g. `AMSExpansion`)
+2. `col[5] >= "<FQ_START>"` — **drop any row with a start date before the current FQ**. Prior quarter entries for the same accounts will have earlier start dates and must be excluded.
+
 **Multi-account rows:** Some rows have multiple SFDC IDs in col[10]. Split using regex `00[A-Za-z0-9]{13,16}` to find all IDs; split account names by comma to match count.
 
 **Known AE name aliases** (sheet → Salesforce):
