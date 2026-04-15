@@ -37,16 +37,6 @@ Do not assume Path C. Most requests are Path A or B. Only proceed once the user 
 
 ---
 
-## Which Path to Use?
-
-| Situation | Path |
-|---|---|
-| Just want to regenerate the HTML with no data changes | **Path A** |
-| Accounts are the same but want fresh activity/RR/UC numbers | **Path B** |
-| New quarter, or accounts were added/removed from the OTB sheet | **Path C** |
-
----
-
 ## Path A — Regenerate Report (no data changes)
 
 No Glean or Snowflake needed. The script uses hardcoded data.
@@ -56,34 +46,22 @@ python3 /tmp/generate_otb_html.py --no-snowflake
 open ~/Downloads/Active_OTB_Analysis.html
 ```
 
-Expected output:
-```
-Written: ~/Downloads/Active_OTB_Analysis.html
-Total accounts: N | Active: X | Inactive: Y
-DMs: D | AEs: A
-```
-
-Then run the **Step 7 verification checklist** below before sharing.
-
 ---
 
 ## Path B — Refresh Data (same accounts, new numbers)
 
-The script now fetches live data from Snowflake automatically — no manual SQL copy-paste needed.
-
 ```bash
 python3 /tmp/generate_otb_html.py           # uses cache if < 4h old
 python3 /tmp/generate_otb_html.py --refresh # forces fresh Snowflake queries
+open ~/Downloads/Active_OTB_Analysis.html
 ```
-
-The `--refresh` flag runs 3 queries in parallel (activity, run rates, use cases) and caches results to `~/.otb_cache.json`. Subsequent runs within 4 hours reuse the cache instantly.
 
 ---
 
 ## Path C — New Quarter or Account Changes (full refresh)
 
 Use when the OTB sheet has been updated with new accounts or a new quarter begins.
-Run all steps 1–7 in order.
+Run steps 1–3 in order.
 
 ---
 
@@ -140,18 +118,9 @@ Once `/tmp/otb_accounts.json` passes all Step 1 checks, run:
 python3 /tmp/generate_otb_html.py --update-accounts /tmp/otb_accounts.json
 ```
 
-This single command does all of the following automatically:
-1. Looks up AE emails in `FIVETRAN.SALESFORCE.USER` (batch, exact name match + last-name ILIKE fallback)
-2. Looks up DM display names from their emails in the same table
-3. Rewrites the `ACCOUNTS` and `AE_EMAIL` sections in the script file in-place
-4. Runs `--refresh`: queries activity, run rates, and use cases in parallel and updates the cache
-5. Generates the HTML report
+Watch stdout for warnings — any `Warning:` line means an AE or DM lookup failed and needs manual correction before proceeding.
 
-Watch stdout for any warnings:
-- `Warning: no exact Salesforce match for AEs: [...]` — the script will attempt a last-name fallback; if it still can't resolve, manually add the email to `AE_EMAIL` in the script
-- `Warning: DM email not found in Salesforce: ...` — the DM email in the JSON is wrong; correct it and re-run
-
-Expected output (printed by the script):
+Expected output:
 ```
 Script patched: /tmp/generate_otb_html.py
 Fetching from Snowflake (3 queries in parallel)...
@@ -170,34 +139,9 @@ The HTML is already written by Step 2. Open it:
 open ~/Downloads/Active_OTB_Analysis.html
 ```
 
-**⚠️ STOP** — review before sharing:
-- Verify: active/inactive split is plausible (not 0 active or all active)
-- Verify: spot-check 2–3 accounts — confirm activity counts match SetSail manually
-- Verify: UC Created/Won counts look reasonable (most accounts 0; flag any with >5 as suspicious)
-- Verify: no accounts show `—` for both RR at Start and Current RR unless the account is truly new
-- Verify: Coverage End date shows `2026-04-30` for all rows
-- Verify: Active badge fires correctly for accounts with UC data but low activity counts
+**⚠️ STOP** — confirm before sharing:
+- Account count in stdout matches expectation (Q1 FY27 AMSExpansion = 45)
+- No `Warning:` lines appeared in Step 2 stdout
+- Coverage End date shows `2026-04-30` for all rows
 
 ---
-
-## Key Tables
-
-| Table | Purpose |
-|---|---|
-| `FIVETRAN.SALESFORCE.USER` | AE/DM name → email lookup |
-| `SALES.ACTIVITY.SETSAIL_RAW_ACTIVITY` | Activity counts and meeting hours |
-| `SALES.SE_REPORTING.AGG_MONTHLY_PRODUCT_CATEGORY_ACCOUNT_METRICS` | Run rates (AVG_DAILY_REVENUE × 365, summed across all product categories) |
-| `MDM.MDM_INTERFACES.DIM_USE_CASE` | Use cases created + won during coverage period |
-
-Warehouse: `SNOWADHOC`
-
----
-
-## Output
-
-`~/Downloads/Active_OTB_Analysis.html` — filterable HTML dashboard:
-- Grouped by DM → AE → accounts
-- Active/Inactive toggle (≥5 acts or ≥3 hrs or ≥1 UC created/won)
-- Columns: Account, Coverage Start, Coverage End, RR at Start, Current RR, RR Change, Activities, Meetings, Emails, Mtg Hrs, UCs Created, UCs Won, Status, Action
-- RR delta indicator (↑/↓/→)
-- SFDC links per account
