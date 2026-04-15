@@ -93,7 +93,9 @@ https://docs.google.com/spreadsheets/d/1rPURUkIlunN9nMICZmZLbdIbtdrZMjsrYgfrUSTv
 "Ali Maahs"       → "Alessandra Maahs"
 "Matt Loewel"     → "Matthew Loewel"
 "danny king"      → "Danny King"
-"Eric Brueninger" → "Eric Brueninger"  # verify spelling each run
+"Nick Ahearn"     → "Nicholas Ahearn"
+"Eric Brueninger" → "Eric Breuninger"  # verify spelling each run
+"Ia Parsons"      → "Ian Parsons"
 ```
 
 Save parsed accounts to `/tmp/otb_accounts.json`:
