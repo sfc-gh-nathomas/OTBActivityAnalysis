@@ -155,17 +155,18 @@ AE_EMAIL = {
     "Chad Sagmoen": "chad.sagmoen@snowflake.com",
     "DJ Kline": "dj.kline@snowflake.com",
     "Danny King": "danny.king@snowflake.com",
-    "David Parrish": "davidparrish06@gmail.com",
+    "David Parrish": "david.parrish@snowflake.com",
     "Eric Breuninger": "eric.breuninger@snowflake.com",
     "Ian Parsons": "ian.parsons@snowflake.com",
     "Ian Towle": "ian.towle@snowflake.com",
-    "John Bird": "public@fireroad33.com",
+    "John Bird": "john.bird@snowflake.com",
     "Jon Poole": "jon.poole@snowflake.com",
     "Linsey Zelhart": "lindsey.zelhart@snowflake.com",
     "Matthew Loewel": "matthew.loewel@snowflake.com",
     "Nick Ahearn": "nicholas.ahearn@snowflake.com",
     "Noah Mahr": "noah.mahr@snowflake.com",
     "Noy Bar": "noy.bar@snowflake.com",
+    "Omar Ramahi": "omar.ramahi@snowflake.com",
     "Riley Babcock": "riley.babcock@snowflake.com",
     "Sawyer Ramsey": "sawyer.ramsey@snowflake.com",
     "Shane Rinkus": "shane.rinkus@snowflake.com",
@@ -953,63 +954,61 @@ function applyFilter() {
 # ─── Account Update ───────────────────────────────────────────────────────────
 
 def _update_accounts_from_json(json_path):
-    """Load a JSON file of account entries, look up AE emails + DM display names
-    in Salesforce, and return (new_accounts_list, new_ae_email_dict).
+    """Load a JSON file of account entries, look up AE emails + DM names
+    from Salesforce via MANAGER_ID join, and return (new_accounts_list, new_ae_email_dict).
+
+    DM is resolved from the AE's Salesforce manager hierarchy (MANAGER_ID join),
+    NOT from any 'dm_email' field in the JSON — that field is ignored.
 
     Expected JSON format:
     [
-      {"ae": "DJ Kline", "dm_email": "nicolette.mullenix@snowflake.com",
-       "account": "Trimble", "account_id": "0013r00002EEIpOAAX", "start_date": "2026-02-01"},
+      {"ae": "DJ Kline", "account": "Trimble", "account_id": "0013r00002EEIpOAAX",
+       "start_date": "2026-02-01"},
       ...
     ]
     """
     with open(json_path) as f:
         entries = json.load(f)
 
-    ae_names  = sorted({e["ae"]       for e in entries})
-    dm_emails = sorted({e["dm_email"] for e in entries})
+    ae_names = sorted({e["ae"] for e in entries})
 
-    # Batch AE name → email lookup
-    ae_in   = ", ".join(f"'{n}'" for n in ae_names)
+    # Single query: AE email + their manager (DM) via MANAGER_ID join
+    ae_in = ", ".join(f"'{n}'" for n in ae_names)
     ae_rows = _run_query(f"""
-        SELECT NAME, EMAIL
-        FROM FIVETRAN.SALESFORCE.USER
-        WHERE EMAIL ILIKE '%@snowflake.com%' AND NAME IN ({ae_in})
+        SELECT u.NAME AS AE_NAME, u.EMAIL AS AE_EMAIL,
+               m.NAME AS DM_NAME, m.EMAIL AS DM_EMAIL
+        FROM FIVETRAN.SALESFORCE.USER u
+        LEFT JOIN FIVETRAN.SALESFORCE.USER m ON u.MANAGER_ID = m.ID
+        WHERE u.EMAIL ILIKE '%@snowflake.com%' AND u.NAME IN ({ae_in})
     """)
-    ae_email_map = {r["NAME"]: r["EMAIL"] for r in ae_rows}
+    ae_email_map = {r["AE_NAME"]: r["AE_EMAIL"] for r in ae_rows}
+    ae_dm_map    = {r["AE_NAME"]: r["DM_NAME"]  for r in ae_rows}
 
-    # Last-name ILIKE fallback for any unresolved AEs
+    # Last-name ILIKE fallback for any unresolved AEs (e.g. "Linsey" vs "Lindsey")
     missing = [n for n in ae_names if n not in ae_email_map]
     if missing:
         print(f"Warning: no exact Salesforce match for AEs: {missing}")
         for name in missing:
             last = name.split()[-1]
             rows = _run_query(f"""
-                SELECT NAME, EMAIL FROM FIVETRAN.SALESFORCE.USER
-                WHERE IS_ACTIVE = TRUE
-                  AND EMAIL ILIKE '%@snowflake.com%'
-                  AND NAME ILIKE '%{last}%' LIMIT 5
+                SELECT u.NAME AS AE_NAME, u.EMAIL AS AE_EMAIL,
+                       m.NAME AS DM_NAME, m.EMAIL AS DM_EMAIL
+                FROM FIVETRAN.SALESFORCE.USER u
+                LEFT JOIN FIVETRAN.SALESFORCE.USER m ON u.MANAGER_ID = m.ID
+                WHERE u.EMAIL ILIKE '%@snowflake.com%'
+                  AND u.NAME ILIKE '%{last}%' LIMIT 5
             """)
             if len(rows) == 1:
-                ae_email_map[name] = rows[0]["EMAIL"]
-                print(f"  Resolved '{name}' → {rows[0]['EMAIL']}")
+                ae_email_map[name] = rows[0]["AE_EMAIL"]
+                ae_dm_map[name]    = rows[0]["DM_NAME"]
+                print(f"  Resolved '{name}' → {rows[0]['AE_EMAIL']} (DM: {rows[0]['DM_NAME']})")
             else:
-                print(f"  Could not auto-resolve '{name}': {[r['NAME'] for r in rows]}")
-
-    # Batch DM email → display name lookup
-    dm_in   = ", ".join(f"'{e}'" for e in dm_emails)
-    dm_rows = _run_query(f"""
-        SELECT NAME, EMAIL FROM FIVETRAN.SALESFORCE.USER WHERE EMAIL IN ({dm_in})
-    """)
-    dm_name_map = {r["EMAIL"]: r["NAME"] for r in dm_rows}
-    for em in dm_emails:
-        if em not in dm_name_map:
-            print(f"Warning: DM email not found in Salesforce: {em}")
+                print(f"  Could not auto-resolve '{name}': {[r['AE_NAME'] for r in rows]}")
 
     # Build new ACCOUNTS list
     new_accounts = []
     for e in entries:
-        dm_name = dm_name_map.get(e["dm_email"], e["dm_email"])
+        dm_name = ae_dm_map.get(e["ae"], "Unknown DM")
         new_accounts.append((e["ae"], dm_name, e["account"], e["account_id"], e["start_date"]))
 
     # Build new AE_EMAIL dict (unique AEs, sorted)

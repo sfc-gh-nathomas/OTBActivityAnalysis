@@ -75,12 +75,13 @@ https://docs.google.com/spreadsheets/d/1rPURUkIlunN9nMICZmZLbdIbtdrZMjsrYgfrUSTv
 ```
 
 **Sheet column map** (0-indexed after splitting on `|`):
-- col[1] = DM email (submitter)
 - col[2] = Theater (filter to `AMSExpansion`)
 - col[4] = AE name
 - col[5] = Coverage start date
 - col[9] = Account name
 - col[10] = SFDC Account ID
+
+> col[1] (form submitter email) is **ignored** — DM is resolved from the AE's Salesforce manager hierarchy by `--update-accounts`, not from the sheet.
 
 **Filtering — apply both before storing any row:**
 1. `col[2] == "<THEATER>"` (e.g. `AMSExpansion`)
@@ -93,14 +94,12 @@ https://docs.google.com/spreadsheets/d/1rPURUkIlunN9nMICZmZLbdIbtdrZMjsrYgfrUSTv
 "Ali Maahs"       → "Alessandra Maahs"
 "Matt Loewel"     → "Matthew Loewel"
 "danny king"      → "Danny King"
-"Nick Ahearn"     → "Nicholas Ahearn"
-"Eric Brueninger" → "Eric Breuninger"  # verify spelling each run
-"Ia Parsons"      → "Ian Parsons"
+"Eric Brueninger" → "Eric Brueninger"  # verify spelling each run
 ```
 
 Save parsed accounts to `/tmp/otb_accounts.json`:
 ```json
-[{"ae": "...", "dm_email": "...", "account": "...", "account_id": "...", "start_date": "YYYY-MM-DD"}]
+[{"ae": "...", "account": "...", "account_id": "...", "start_date": "YYYY-MM-DD"}]
 ```
 
 **⚠️ STOP** — verify before proceeding:
